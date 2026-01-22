@@ -16,11 +16,11 @@ The implementation includes:
 - Pose graph edges (odometry + loop closure)
 - Residual and cost formulation
 - Numeric Jacobians (finite differences)
-- Gauss–Newton optimizer
+- Gauss–Newton optimiser
 - Gauge freedom handling (anchoring the first pose)
 - Robust loss (Huber) for loop closures
 - Quantitative evaluation metrics
-- CSV export for trajectory visualization
+- CSV export for trajectory visualisation
 
 The goal is clarity and correctness rather than raw performance.
 
@@ -38,8 +38,8 @@ The goal is clarity and correctness rather than raw performance.
    - Odometry edges connect consecutive poses  
    - A loop closure edge connects the final pose back to the start using ground truth
 
-4. **Optimization**  
-   The pose graph is optimized using Gauss–Newton:
+4. **Optimisation**  
+   The pose graph is optimised using Gauss–Newton:
    - Residuals are computed in SE(2)
    - Jacobians are computed numerically
    - Normal equations are assembled and solved
@@ -47,8 +47,8 @@ The goal is clarity and correctness rather than raw performance.
 
 5. **Evaluation**  
    The system reports:
-   - Loop closure residuals before and after optimization
-   - Total cost before and after optimization
+   - Loop closure residuals before and after optimisation
+   - Total cost before and after optimisation
    - RMSE position error
    - Mean absolute heading error
 
@@ -58,13 +58,13 @@ The goal is clarity and correctness rather than raw performance.
 
 When you run the program, you should see:
 
-- A noticeable drift in the final pose **before** optimization
-- A large loop closure residual before optimization
+- A noticeable drift in the final pose **before** optimisation
+- A large loop closure residual before optimisation
 - Rapid convergence of Gauss–Newton (cost drops by orders of magnitude)
-- A much smaller loop closure residual **after** optimization
+- A much smaller loop closure residual **after** optimisation
 - Significantly improved RMSE and heading error
 
-This demonstrates the core value of pose graph SLAM: **global consistency through optimization**.
+This demonstrates the core value of pose graph SLAM: **global consistency through optimisation**.
 
 ---
 
