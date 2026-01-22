@@ -1,32 +1,77 @@
 # pose-graph-slam-2d
 
-A from-scratch C++ implementation of 2D pose graph SLAM (SE(2)), including simulation, nonlinear optimization (Gauss–Newton), robust loop closures, and trajectory evaluation.
+A from-scratch C++ implementation of a **2D pose graph SLAM backend (SE(2))**, built to demonstrate core SLAM mechanics without relying on external libraries.
 
-## Overview
-This project implements the **backend of a SLAM system** from first principles, focusing on:
-- SE(2) pose representations and operators (⊕, ⊖)
-- Pose graph residual formulation
-- Nonlinear least squares optimization (Gauss–Newton)
-- Robust loss functions for loop closures
-- Gauge freedom handling and trajectory evaluation
-
-The implementation is intentionally library-light to emphasize understanding of core SLAM mechanics.
-
-## Features (planned / in progress)
-- SE(2) pose composition, inversion, and relative pose
-- Simulated robot trajectories with noisy odometry
-- Pose graph construction (nodes + edges)
-- Gauss–Newton optimization
-- Robust loop closures (Huber loss + gating)
-- CSV trajectory export and RMSE evaluation
-
-## Motivation
-This project was built to demonstrate fundamental SLAM competence and to serve as a foundation for future extensions (SE(3), sensor fusion, and multi-robot SLAM).
-
-## Future extensions
-- SE(3) pose graph SLAM
-- IMU preintegration factors
-- Multi-robot loop closures
-- Robust SLAM under degraded sensing conditions (e.g. smoke)
+This project focuses on the *backend* of SLAM: pose graph formulation, residuals, Jacobians, and nonlinear optimization. It intentionally avoids frameworks like g2o or Ceres to make the underlying math and algorithms explicit and easy to reason about.
 
 ---
+
+## Overview
+
+The system simulates a robot moving through a planar environment using noisy odometry, accumulates drift, and then corrects that drift using a loop closure constraint and **Gauss–Newton optimization**.
+
+The implementation includes:
+
+- SE(2) pose representations and operators (⊕, ⊖)
+- Pose graph edges (odometry + loop closure)
+- Residual and cost formulation
+- Numeric Jacobians (finite differences)
+- Gauss–Newton optimizer
+- Gauge freedom handling (anchoring the first pose)
+- Robust loss (Huber) for loop closures
+- Quantitative evaluation metrics
+- CSV export for trajectory visualization
+
+The goal is clarity and correctness rather than raw performance.
+
+---
+
+## How it works (high level)
+
+1. **Ground truth trajectory**  
+   A closed-loop trajectory is generated using a known motion model.
+
+2. **Noisy odometry**  
+   Gaussian noise is added to relative motions, and the robot’s estimated trajectory is built by chaining these noisy measurements. This causes drift.
+
+3. **Pose graph construction**  
+   - Odometry edges connect consecutive poses  
+   - A loop closure edge connects the final pose back to the start using ground truth
+
+4. **Optimization**  
+   The pose graph is optimized using Gauss–Newton:
+   - Residuals are computed in SE(2)
+   - Jacobians are computed numerically
+   - Normal equations are assembled and solved
+   - The first pose is fixed to remove gauge freedom
+
+5. **Evaluation**  
+   The system reports:
+   - Loop closure residuals before and after optimization
+   - Total cost before and after optimization
+   - RMSE position error
+   - Mean absolute heading error
+
+---
+
+## Expected behavior
+
+When you run the program, you should see:
+
+- A noticeable drift in the final pose **before** optimization
+- A large loop closure residual before optimization
+- Rapid convergence of Gauss–Newton (cost drops by orders of magnitude)
+- A much smaller loop closure residual **after** optimization
+- Significantly improved RMSE and heading error
+
+This demonstrates the core value of pose graph SLAM: **global consistency through optimization**.
+
+---
+
+## How to run
+
+This project is a single self-contained C++ file.
+
+```bash
+g++ main.cpp -std=c++17 -O2
+./a.out
