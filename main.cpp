@@ -4,6 +4,8 @@
 #include <random>
 #include <limits>
 #include <iomanip>
+#include <fstream>
+#include <string>
 
 // ============================================================
 // 2D Pose Graph SLAM (SE(2)) - From scratch in one file
@@ -11,10 +13,12 @@
 // - SE(2) pose ops: compose (⊕), inverse, between (⊖)
 // - Pose graph edges (odometry + loop closure)
 // - Residuals and weighted cost
-// - Robust Huber loss (optional for loop closures)
+// - Robust Huber loss (for loop closures)
 // - Numeric Jacobians (finite differences)
 // - Gauss-Newton optimizer with gauge fixing (anchor pose 0)
-// - Simple Gaussian elimination linear solver
+// - Simple Gaussian elimination linear solver (dense)
+// - CSV export: traj_gt.csv, traj_before.csv, traj_after.csv
+// - Metrics: RMSE position + mean abs heading error
 // ============================================================
 
 const double PI = 3.141592653589793;
@@ -101,14 +105,12 @@ double weightedError(const std::vector<double>& r, double w_t, double w_r) {
 // Huber robust weight based on sqrt(error)
 // Returns a multiplier in (0,1] to downweight large residuals
 double huberWeightFromError(double e, double delta) {
-    // e is sqrt(weighted_error), delta is threshold
     if (e <= delta) return 1.0;
     return delta / e;
 }
 
 // ============================================================
-// Linear algebra utilities (library-free)
-// We'll use dense matrices/vectors stored as std::vector<double>
+// Linear algebra utilities (dense, no external libs)
 // ============================================================
 
 struct DenseMat {
@@ -128,30 +130,25 @@ struct DenseVec {
     double  operator[](int i) const { return v[i]; }
 };
 
-// Simple Gaussian elimination with partial pivoting
-// Solves A x = b for x. Returns false if singular.
+// Gaussian elimination with partial pivoting
 bool solveLinearSystem(DenseMat A, DenseVec b, DenseVec& x_out) {
     const int n = A.n;
     x_out = DenseVec(n);
 
-    // Forward elimination
     for (int k = 0; k < n; k++) {
-        // Pivot
         int piv = k;
         double maxAbs = std::fabs(A(k,k));
         for (int r = k+1; r < n; r++) {
             double val = std::fabs(A(r,k));
             if (val > maxAbs) { maxAbs = val; piv = r; }
         }
-        if (maxAbs < 1e-14) return false; // singular / ill-conditioned
+        if (maxAbs < 1e-14) return false;
 
-        // Swap rows in A and b
         if (piv != k) {
             for (int c = k; c < n; c++) std::swap(A(k,c), A(piv,c));
             std::swap(b[k], b[piv]);
         }
 
-        // Eliminate below
         for (int r = k+1; r < n; r++) {
             double f = A(r,k) / A(k,k);
             A(r,k) = 0.0;
@@ -162,20 +159,16 @@ bool solveLinearSystem(DenseMat A, DenseVec b, DenseVec& x_out) {
         }
     }
 
-    // Back substitution
     for (int i = n-1; i >= 0; i--) {
         double s = b[i];
         for (int c = i+1; c < n; c++) s -= A(i,c) * x_out[c];
         x_out[i] = s / A(i,i);
     }
-
     return true;
 }
 
 // ============================================================
-// Numeric Jacobians for one edge
-// We need A = dr/dxi (3x3) and B = dr/dxj (3x3)
-// We'll compute by finite difference on box-plus.
+// Numeric Jacobians (finite differences)
 // ============================================================
 
 struct Mat3 {
@@ -225,10 +218,9 @@ Mat3 numericJacobian_wrt_j(const Pose2D& xi, const Pose2D& xj, const Pose2D& z,
 }
 
 // ============================================================
-// Build and solve Gauss-Newton normal equations
+// Helpers to assemble normal equations
 // ============================================================
 
-// Add 3x3 block into H at (bi,bj)
 void addBlock(DenseMat& H, int bi, int bj, const double blk[3][3]) {
     for (int r = 0; r < 3; r++) {
         for (int c = 0; c < 3; c++) {
@@ -237,23 +229,19 @@ void addBlock(DenseMat& H, int bi, int bj, const double blk[3][3]) {
     }
 }
 
-// Add 3-vector into g at index bi
 void addVec(DenseVec& g, int bi, const double v3[3]) {
     for (int r = 0; r < 3; r++) g[bi + r] += v3[r];
 }
 
-// Multiply 3x3^T * W(3x3 diag) * 3x3  -> 3x3
-// Here W is diag([w_t, w_t, w_r]) * robust_weight
+// out = A^T * diag(W) * A, where W = [w_t, w_t, w_r] * robust_w
 void compute_AT_W_A(const Mat3& A, double w_t, double w_r, double robust_w, double out[3][3]) {
-    // W diagonal
     double W[3] = { robust_w * w_t, robust_w * w_t, robust_w * w_r };
 
-    // out = A^T * diag(W) * A
     for (int r = 0; r < 3; r++)
         for (int c = 0; c < 3; c++)
             out[r][c] = 0.0;
 
-    for (int k = 0; k < 3; k++) { // row in residual space
+    for (int k = 0; k < 3; k++) {
         for (int r = 0; r < 3; r++) {
             for (int c = 0; c < 3; c++) {
                 out[r][c] += A.m[k][r] * W[k] * A.m[k][c];
@@ -262,7 +250,7 @@ void compute_AT_W_A(const Mat3& A, double w_t, double w_r, double robust_w, doub
     }
 }
 
-// Compute A^T * W * B -> 3x3
+// out = A^T * diag(W) * B
 void compute_AT_W_B(const Mat3& A, const Mat3& B, double w_t, double w_r, double robust_w, double out[3][3]) {
     double W[3] = { robust_w * w_t, robust_w * w_t, robust_w * w_r };
 
@@ -279,7 +267,7 @@ void compute_AT_W_B(const Mat3& A, const Mat3& B, double w_t, double w_r, double
     }
 }
 
-// Compute A^T * W * r -> 3
+// out = A^T * diag(W) * r
 void compute_AT_W_r(const Mat3& A, const std::vector<double>& r, double w_t, double w_r, double robust_w, double out[3]) {
     double W[3] = { robust_w * w_t, robust_w * w_t, robust_w * w_r };
     out[0]=out[1]=out[2]=0.0;
@@ -291,12 +279,17 @@ void compute_AT_W_r(const Mat3& A, const std::vector<double>& r, double w_t, dou
     }
 }
 
+// ============================================================
+// Cost and optimizer
+// ============================================================
+
 double totalCost(const std::vector<Edge>& edges, const std::vector<Pose2D>& x,
                  bool use_huber=false, double huber_delta=1.0) {
     double cost = 0.0;
     for (const auto& e : edges) {
         auto r = residual(x[e.i], x[e.j], e.z);
         double err = weightedError(r, e.w_t, e.w_r);
+
         double robust_w = 1.0;
         if (use_huber && e.is_loop) {
             robust_w = huberWeightFromError(std::sqrt(err), huber_delta);
@@ -317,7 +310,6 @@ bool gaussNewtonOptimize(std::vector<Pose2D>& x, const std::vector<Edge>& edges,
 
         double cost = 0.0;
 
-        // Build H and g
         for (const auto& e : edges) {
             const Pose2D& xi = x[e.i];
             const Pose2D& xj = x[e.j];
@@ -334,20 +326,11 @@ bool gaussNewtonOptimize(std::vector<Pose2D>& x, const std::vector<Edge>& edges,
             Mat3 A = numericJacobian_wrt_i(xi, xj, e.z);
             Mat3 B = numericJacobian_wrt_j(xi, xj, e.z);
 
-            // Blocks:
-            // H_ii += A^T W A
-            // H_ij += A^T W B
-            // H_ji += B^T W A
-            // H_jj += B^T W B
-            // g_i  += A^T W r
-            // g_j  += B^T W r
-
             double Hii[3][3], Hij[3][3], Hjj[3][3];
             compute_AT_W_A(A, e.w_t, e.w_r, robust_w, Hii);
             compute_AT_W_B(A, B, e.w_t, e.w_r, robust_w, Hij);
             compute_AT_W_A(B, e.w_t, e.w_r, robust_w, Hjj);
 
-            // B^T W A is transpose of A^T W B if W is diagonal (it is)
             double Hji[3][3];
             for (int r0=0; r0<3; r0++)
                 for (int c0=0; c0<3; c0++)
@@ -369,25 +352,21 @@ bool gaussNewtonOptimize(std::vector<Pose2D>& x, const std::vector<Edge>& edges,
             addVec(g, bj, gj);
         }
 
-        // Gauge fixing: anchor pose 0 strongly (x0,y0,theta0)
-        // Add a huge prior on the first 3 variables: delta0 = 0
+        // Gauge fixing: anchor pose 0 with a strong prior (delta = 0)
         const double lambda = 1e12;
         H(0,0) += lambda;
         H(1,1) += lambda;
         H(2,2) += lambda;
 
-        // Solve H * dx = -g
         DenseVec b(dim);
         for (int i = 0; i < dim; i++) b[i] = -g[i];
 
         DenseVec dx;
-        bool ok = solveLinearSystem(H, b, dx);
-        if (!ok) {
-            std::cout << "Linear solve failed (singular). Try different settings.\n";
+        if (!solveLinearSystem(H, b, dx)) {
+            std::cout << "Linear solve failed (singular/ill-conditioned).\n";
             return false;
         }
 
-        // Apply update
         double max_step = 0.0;
         for (int k = 0; k < N; k++) {
             Pose2D d(dx[3*k + 0], dx[3*k + 1], dx[3*k + 2]);
@@ -406,11 +385,8 @@ bool gaussNewtonOptimize(std::vector<Pose2D>& x, const std::vector<Edge>& edges,
                   << "  max_step=" << max_step
                   << "\n";
 
-        // Convergence check
         if (max_step < 1e-6) break;
 
-        // If cost increased badly (rare with GN), you can stop early
-        // This keeps the demo stable in basic environments.
         if (new_cost > cost * 1.5) {
             std::cout << "Warning: cost increased significantly; stopping early.\n";
             break;
@@ -421,7 +397,7 @@ bool gaussNewtonOptimize(std::vector<Pose2D>& x, const std::vector<Edge>& edges,
 }
 
 // ============================================================
-// Simulation helpers
+// Simulation + evaluation
 // ============================================================
 
 double randn(std::mt19937& rng, double sigma) {
@@ -429,10 +405,47 @@ double randn(std::mt19937& rng, double sigma) {
     return dist(rng);
 }
 
+void writeCSV(const std::string& filename, const std::vector<Pose2D>& traj) {
+    std::ofstream f(filename);
+    if (!f) {
+        std::cout << "Warning: could not write file: " << filename << "\n";
+        return;
+    }
+    f << "idx,x,y,theta\n";
+    for (size_t i = 0; i < traj.size(); i++) {
+        f << i << "," << traj[i].x << "," << traj[i].y << "," << traj[i].theta << "\n";
+    }
+}
+
+struct Metrics {
+    double rmse_pos;
+    double mean_abs_theta;
+};
+
+Metrics computeMetrics(const std::vector<Pose2D>& gt, const std::vector<Pose2D>& est) {
+    const size_t n = std::min(gt.size(), est.size());
+    double sum_sq = 0.0;
+    double sum_abs_th = 0.0;
+
+    for (size_t i = 0; i < n; i++) {
+        double dx = est[i].x - gt[i].x;
+        double dy = est[i].y - gt[i].y;
+        sum_sq += dx*dx + dy*dy;
+
+        double dth = wrapAngle(est[i].theta - gt[i].theta);
+        sum_abs_th += std::fabs(dth);
+    }
+
+    Metrics m;
+    m.rmse_pos = std::sqrt(sum_sq / (double)n);
+    m.mean_abs_theta = sum_abs_th / (double)n;
+    return m;
+}
+
 int main() {
     // ----- 1) Ground truth trajectory -----
     const int N = 40;
-    Pose2D u_true(0.5, 0.0, PI/20.0); // forward + small turn => curved path
+    Pose2D u_true(0.5, 0.0, PI/20.0); // forward + small turn => curved path (closes over 40 steps)
 
     std::vector<Pose2D> gt;
     gt.reserve(N+1);
@@ -442,9 +455,9 @@ int main() {
     }
 
     // ----- 2) Noisy odometry measurements + drifting initial estimate -----
-    std::mt19937 rng(42);
-    const double sigma_trans = 0.02;              // meters
-    const double sigma_rot   = (1.0 * PI/180.0);  // 1 deg in rad
+    std::mt19937 rng(42);                  // fixed seed (reproducible)
+    const double sigma_trans = 0.02;       // meters
+    const double sigma_rot   = (1.0 * PI/180.0); // 1 degree in radians
 
     std::vector<Edge> edges;
     edges.reserve(N + 1);
@@ -473,7 +486,9 @@ int main() {
     Pose2D z_loop_true = between(gt[0], gt[N]);
     edges.emplace_back(0, N, z_loop_true, 5.0, 5.0, true);
 
-    // Print before optimization
+    // Save BEFORE (for CSV + metrics)
+    std::vector<Pose2D> x_before = x;
+
     std::cout << "N = " << N << "\n";
     std::cout << "Initial estimate start: x0=(" << x[0].x << "," << x[0].y << "," << x[0].theta << ")\n";
     std::cout << "Initial estimate end:   xN=(" << x[N].x << "," << x[N].y << "," << x[N].theta << ")\n";
@@ -484,13 +499,21 @@ int main() {
     std::cout << "r_loop = [" << r_loop0[0] << ", " << r_loop0[1] << ", " << r_loop0[2] << "]\n";
 
     double cost0 = totalCost(edges, x, true, 1.0);
-    std::cout << "Total cost (before): " << cost0 << "\n\n";
+    std::cout << "Total cost (before): " << cost0 << "\n";
+
+    auto mb = computeMetrics(gt, x_before);
+    std::cout << "\nMetrics BEFORE:\n";
+    std::cout << "RMSE position: " << mb.rmse_pos << "\n";
+    std::cout << "Mean abs heading error: " << mb.mean_abs_theta << "\n";
+
+    // CSV exports (may not work in some online compilers)
+    writeCSV("traj_gt.csv", gt);
+    writeCSV("traj_before.csv", x_before);
 
     // ----- 4) Optimize -----
-    std::cout << "Running Gauss-Newton...\n";
+    std::cout << "\nRunning Gauss-Newton...\n";
     gaussNewtonOptimize(x, edges, 10, true, 1.0);
 
-    // Print after optimization
     auto r_loop1 = residual(x[0], x[N], z_loop_true);
     std::cout << "\nLoop closure residual AFTER:\n";
     std::cout << "r_loop = [" << r_loop1[0] << ", " << r_loop1[1] << ", " << r_loop1[2] << "]\n";
@@ -498,8 +521,17 @@ int main() {
     double cost1 = totalCost(edges, x, true, 1.0);
     std::cout << "Total cost (after): " << cost1 << "\n";
 
+    auto ma = computeMetrics(gt, x);
+    std::cout << "\nMetrics AFTER:\n";
+    std::cout << "RMSE position: " << ma.rmse_pos << "\n";
+    std::cout << "Mean abs heading error: " << ma.mean_abs_theta << "\n";
+
     std::cout << "\nOptimized end pose: xN=(" << x[N].x << "," << x[N].y << "," << x[N].theta << ")\n";
     std::cout << "Ground truth end:   gtN=(" << gt[N].x << "," << gt[N].y << "," << gt[N].theta << ")\n";
+
+    writeCSV("traj_after.csv", x);
+
+    std::cout << "\nWrote CSV files (if supported): traj_gt.csv, traj_before.csv, traj_after.csv\n";
 
     return 0;
 }
